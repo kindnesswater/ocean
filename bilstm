@@ -1,0 +1,167 @@
+clc
+clear
+
+X = xlsread('data.xlsx');
+num_samples = length(X);        
+kim = 24;                      
+zim = 24;                      
+or_dim = size(X,2)-1;          
+
+for i = 1: num_samples - kim - zim + 1
+    res(i, :) = [reshape(X(i: i + kim - 1,1:5), 1, kim*or_dim), X(i + kim + zim - 1,end)];   
+end
+
+Features   = res(:,1:120);                  
+Wind_data  = res(:,121);  
+
+XTrain = Features(1:3550,:);                     
+YTrain = Wind_data(1:3550,:);                                    
+
+XTest  = Features(3550:end,:);       
+YTest  = Wind_data(3550:end,:);               
+
+
+% method = @mapminmax; 
+method = @mapstd;                                  
+[xs, mappingx] = method(XTrain'); XTrain = xs;    
+xs = method('apply', XTest', mappingx); XTest = xs; 
+[ys, mappingy] = method(YTrain'); YTrain = ys;     
+ys = method('apply', YTest', mappingy); YTest = ys; 
+
+optimization = 1;                                                  
+if optimization == 1
+    [x, fit_gen, process] = psoforlstm(XTrain, YTrain, XTest, YTest);
+    save 结果保存/pso_result x fit_gen process                       
+else
+    load 结果保存/pso_result                                         
+end
+
+draw(fit_gen, process, 'PSO')                    
+disp('优化的超参数为：')
+disp(['隐含层1单元数: ', num2str(x(1))])
+disp(['隐含层2单元数: ', num2str(x(2))])
+disp(['最大迭代次数: ', num2str(x(3))])
+disp(['学习率: ', num2str(x(4))])
+
+train = 1;                                     
+if train == 1
+    rng(1)                                     
+    numFeatures = size(XTrain, 1);              
+    numResponses = size(YTrain, 1);             
+    miniBatchSize = 16;                        
+    numHiddenUnits1 = x(1);                      
+    numHiddenUnits2 = x(2);                     
+    maxEpochs = x(3);                             
+    learning_rate = x(4);                        
+
+    layers = [ ...
+        sequenceInputLayer(numFeatures)          
+        lstmLayer(numHiddenUnits1)              
+        lstmLayer(numHiddenUnits2)               
+        fullyConnectedLayer(numResponses)         
+        regressionLayer];                         
+
+    %% 训练选项
+    options = trainingOptions('adam', ...         
+        'MaxEpochs', maxEpochs, ...              
+        'MiniBatchSize', miniBatchSize, ...       
+        'InitialLearnRate', learning_rate, ...    
+        'GradientThreshold', 1, ...              
+        'Shuffle', 'every-epoch', ...            
+        'Verbose', true, ...                     
+        'Plots', 'training-progress');           
+    net = trainNetwork(XTrain, YTrain, layers, options);
+    save 结果保存/net_pso_lstm net   
+else
+    load 结果保存/net_pso_lstm       
+end
+
+YPred = predict(net, XTest); YPred = double(YPred); 
+
+predict_value = method('reverse', YPred, mappingy);
+true_value = method('reverse', YTest, mappingy);    
+
+save 结果保存/pso_lstm predict_value true_value     
+
+load 结果保存/pso_lstm                              
+[m, n] = size(true_value);
+true_value = reshape(true_value', [1, m * n]);       
+predict_value = reshape(predict_value', [1, m * n]); 
+disp('结果分析')
+rmse = sqrt(mean((true_value - predict_value).^2)); 
+disp(['根均方差(RMSE)：', num2str(rmse)])           
+mae = mean(abs(true_value - predict_value));       
+disp(['平均绝对误差（MAE）：', num2str(mae)])        
+mape = mean(abs((true_value - predict_value) ./ true_value)); 
+disp(['平均相对百分误差（MAPE）：', num2str(mape * 100), '%']) 
+
+
+function [xm ,trace,result]=psoforlstm(p_train,t_train,p_test,t_test)
+
+N=20;
+M=10;
+c1=1.5;
+c2=1.5;
+w=0.8;
+D=4;            
+
+xmin=[100 100 0   0.001];
+xmax=[200 200 100 0.01 ];   
+
+for i=1:N
+    for j=1:D
+        if j==D
+            x(i,j)=(xmax(j)-xmin(j))*rand+xmin(j);
+        else
+            x(i,j)=round((xmax(j)-xmin(j))*rand+xmin(j));  %
+        end
+    end
+    
+    v(i,:)=rand(1,D);
+end
+
+for i=1:N
+    p(i)=fitness(x(i,:),p_train,t_train,p_test,t_test);
+    y(i,:)=x(i,:);
+    
+end
+[fg,index]=min(p);
+pg = x(index,:);            
+
+for t=1:M
+    
+    for i=1:N
+        v(i,:)=w*v(i,:)+c1*rand*(y(i,:)-x(i,:))+c2*rand*(pg-x(i,:));
+        x(i,:)=x(i,:)+v(i,:);
+        
+        
+        for j=1:D
+            if j ~=D
+                x(i,j)=round(x(i,j));
+            end
+            if x(i,j)>xmax(j) | x(i,j)<xmin(j)
+                if j==D
+                    x(i,j)=(xmax(j)-xmin(j))*rand+xmin(j);  %
+                else
+                    x(i,j)=round((xmax(j)-xmin(j))*rand+xmin(j));  %
+                end
+            end
+        end
+        temp=fitness(x(i,:),p_train,t_train,p_test,t_test);
+        if temp<p(i)
+            p(i)=temp;
+            y(i,:)=x(i,:);
+        end
+        
+        if p(i)<fg
+            pg=y(i,:);
+            fg=p(i);
+        end
+    end
+    trace(t)=fg;
+    result(t,:)=pg;
+    disp(['第' num2str(t) '次优化']);
+    disp(['至今最佳适应度MSE：' num2str(fg) ]);
+    disp(['至今最佳的四个优化参数值：' num2str(pg)]);
+end
+xm = pg;
