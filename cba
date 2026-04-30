@@ -1,0 +1,349 @@
+clc
+clear 
+
+X = xlsread('DATA.xlsx'); 
+
+num_samples = length(X);      
+kim = 24;                    
+zim = 24;                    
+or_dim = size(X,2);        
+
+
+
+for i = 1: num_samples - kim - zim + 1
+    res(i, :) = reshape(X(i: i + kim - 1,1:6), 1, kim*or_dim);
+end
+
+for i = 1: num_samples - kim - zim + 1
+    res_(i, :) = X(i + zim: i + kim + zim - 1,6);
+end
+
+
+
+outdim = 1;                                
+num_size = 0.8;                              
+num_train_s = round(num_size * num_samples); 
+f = size(res, 2);                  
+f_ = size(res_, 2);   
+
+P_train = res(1: num_train_s, 1: f)';
+T_train = res_(1: num_train_s, 1: f_)';
+M = size(P_train, 2);
+
+P_test = res(num_train_s + 1: end, 1: f)';
+T_test = res_(num_train_s + 1: end, 1:f_)';
+N = size(P_test, 2);
+
+
+[p_train, ps_input] = mapminmax(P_train, 0, 1); 
+p_test = mapminmax('apply', P_test, ps_input);
+
+[t_train, ps_output] = mapminmax(T_train, 0, 1);
+t_test = mapminmax('apply', T_test, ps_output);
+
+
+for i = 1:size(P_train,2)
+    trainD{i,:} = (reshape(p_train(:,i),size(p_train,1),1,1));
+end
+
+for i = 1:size(p_test,2)
+    testD{i,:} = (reshape(p_test(:,i),size(p_test,1),1,1));
+end
+
+
+targetD =  t_train;
+targetD_test  =  t_test;
+
+numFeatures = size(p_train,1);
+
+
+layers0 = [ ...
+   
+    sequenceInputLayer([numFeatures,1,1],'name','input')  
+    sequenceFoldingLayer('name','fold')       
+    convolution2dLayer([3,1],16,'Stride',[1,1],'name','conv1')  
+    batchNormalizationLayer('name','batchnorm1') 
+    reluLayer('name','relu1')      
+    maxPooling2dLayer([2,1],'Stride',2,'Padding','same','name','maxpool')   
+    sequenceUnfoldingLayer('name','unfold')       
+    flattenLayer('name','flatten')  %平滑层
+    
+    bilstmLayer(25,'Outputmode','last','name','hidden1') 
+    selfAttentionLayer(1,2)         
+    dropoutLayer(0.1,'name','dropout_1')       
+
+    fullyConnectedLayer(24,'name','fullconnect')   
+    regressionLayer('Name','output')    ];
+    
+lgraph0 = layerGraph(layers0);
+lgraph0 = connectLayers(lgraph0,'fold/miniBatchSize','unfold/miniBatchSize');
+
+
+%% Set the hyper parameters for unet training
+options0 = trainingOptions('adam', ...               
+    'MaxEpochs', 50, ...                          
+    'GradientThreshold', 1, ...                      
+    'InitialLearnRate', 0.01, ...         
+    'L2Regularization', 0.001, ...         
+    'MiniBatchSize',16,...
+    'ExecutionEnvironment', 'cpu',...               
+    'Verbose', 1, ...                                
+    'Plots', 'none');                  
+
+tic
+net = trainNetwork(trainD,targetD',lgraph0,options0);
+toc
+%analyzeNetwork(net);
+
+t_sim = net.predict(testD)';  
+analyzeNetwork(net);
+
+T_sim = mapminmax('reverse', t_sim, ps_output); %t_sim(182,24) t_test(24,182)
+
+
+T_sim = double(T_sim);
+
+%% 优化CNN-BiLSTM-Attention
+
+disp(' ')
+disp('优化CNN_BiLSTM_attention神经网络：')
+
+%% 初始化参数 
+popsize=20;  
+maxgen=30;  
+fobj = @(x)objectiveFunction(x,f,trainD,targetD',testD,T_test',ps_output);
+
+lb = [0.001 40 10  0.0001];  
+ub = [0.01  100 50 0.001];    
+dim = length(lb);           
+
+
+[Best_score,Best_pos,curve]=PSO(popsize,maxgen,lb,ub,dim,fobj); 
+setdemorandstream(pi);
+
+%% 绘制进化曲线 
+figure
+plot(curve,'r-','linewidth',2)
+xlabel('进化代数')
+ylabel('均方误差')
+legend('最佳适应度')
+title('进化曲线')
+
+
+%[~,optimize_T_sim] = objectiveFunction(Best_pos,f,trainD,targetD',testD,T_test,ps_output);
+[~,optimize_T_sim] = objectiveFunction(Best_pos,f,trainD,targetD',testD,T_test',ps_output);
+setdemorandstream(pi);
+ 
+str={'真实值','CNN-BiLSTM-Attention','优化后CNN-BiLSTM-Attention'};
+figure('Units', 'pixels', ...
+    'Position', [300 300 860 370]);
+plot(T_test,'-','Color',[0.8500 0.3250 0.0980]) 
+hold on
+plot(T_sim,'-.','Color',[0.4940 0.1840 0.5560]) 
+hold on
+plot(optimize_T_sim,'-','Color',[0.4660 0.6740 0.1880])
+legend(str)
+set (gca,"FontSize",12,'LineWidth',1.2)
+box off
+legend Box off
+
+
+
+test_y = T_test;
+Test_all = [];
+
+%y_test_predict = T_sim;
+y_test_predict = T_sim';
+[test_MAE,test_MAPE,test_MSE,test_RMSE,test_R2]=calc_error(y_test_predict,test_y);
+Test_all=[Test_all;test_MAE test_MAPE test_MSE test_RMSE test_R2];
+
+
+y_test_predict = optimize_T_sim;
+[test_MAE,test_MAPE,test_MSE,test_RMSE,test_R2]=calc_error(y_test_predict,test_y);
+Test_all=[Test_all;test_MAE test_MAPE test_MSE test_RMSE test_R2];
+ 	
+
+str={'真实值','CNN-BiLSTM-Attention','优化后CNN-BiLSTM-Attention'};
+str1=str(2:end);
+str2={'MAE','MAPE','MSE','RMSE','R2'};
+data_out=array2table(Test_all);
+data_out.Properties.VariableNames=str2;
+data_out.Properties.RowNames=str1;
+disp(data_out)
+
+
+color=    [0.66669    0.1206    0.108
+    0.1339    0.7882    0.8588
+    0.1525    0.6645    0.1290
+    0.8549    0.9373    0.8275   
+    0.1551    0.2176    0.8627
+    0.7843    0.1412    0.1373
+    0.2000    0.9213    0.8176
+      0.5569    0.8118    0.7882
+       1.0000    0.5333    0.5176];
+figure('Units', 'pixels', ...
+    'Position', [300 300 660 375]);
+plot_data_t=Test_all(:,[1,2,4])';
+b=bar(plot_data_t,0.8);
+hold on
+
+for i = 1 : size(plot_data_t,2)
+    x_data(:, i) = b(i).XEndPoints'; 
+end
+
+for i =1:size(plot_data_t,2)
+    b(i).FaceColor = color(i,:);
+    b(i).EdgeColor=[0.3353    0.3314    0.6431];
+    b(i).LineWidth=1.2;
+end
+
+for i = 1 : size(plot_data_t,1)-1
+    xilnk=(x_data(i, end)+ x_data(i+1, 1))/2;
+    b1=xline(xilnk,'--','LineWidth',1.2);
+    hold on
+end 
+
+ax=gca;
+legend(b,str1,'Location','best')
+ax.XTickLabels ={'MAE', 'MAPE', 'RMSE'};
+set(gca,"FontSize",10,"LineWidth",1)
+box off
+legend box off
+
+
+figure
+plot_data_t1=Test_all(:,[1,5])';
+MarkerType={'s','o','pentagram','^','v'};
+for i = 1 : size(plot_data_t1,2)
+   scatter(plot_data_t1(1,i),plot_data_t1(2,i),120,MarkerType{i},"filled")
+   hold on
+end
+set(gca,"FontSize",12,"LineWidth",2)
+box off
+legend box off
+legend(str1,'Location','best')
+xlabel('MAE')
+ylabel('R2')
+grid on
+
+
+figure('Units', 'pixels', ...
+    'Position', [150 150 520 500]);
+Test_all1=Test_all./sum(Test_all);  
+Test_all1(:,end)=1-Test_all(:,end);
+RC=radarChart(Test_all1);
+str3={'MAE','MAPE','MSE','RMSE','R2'};
+RC.PropName=str3;
+RC.ClassName=str1;
+RC=RC.draw(); 
+RC.legend();
+RC.setBkg('FaceColor',[1,1,1])
+RC.setRLabel('Color','none')
+colorList=[78 101 155;
+          181 86 29;
+          184 168 207;
+          231 188 198;
+          253 207 158;
+          239 164 132;
+          182 118 108]./255;
+
+for n=1:RC.ClassNum
+    RC.setPatchN(n,'Color',colorList(n,:),'MarkerFaceColor',colorList(n,:))
+end
+
+
+
+%%
+figure('Units', 'pixels', ...
+    'Position', [150 150 920 600]);
+t = tiledlayout('flow','TileSpacing','compact');
+for i=1:length(Test_all(:,1))
+nexttile
+th1 = linspace(2*pi/length(Test_all(:,1))/2,2*pi-2*pi/length(Test_all(:,1))/2,length(Test_all(:,1)));
+r1 = Test_all(:,i)';
+[u1,v1] = pol2cart(th1,r1);
+M=compass(u1,v1);
+for j=1:length(Test_all(:,1))
+    M(j).LineWidth = 2;
+    M(j).Color = colorList(j,:);
+
+end   
+title(str2{i})
+set(gca,"FontSize",10,"LineWidth",1)
+end
+ legend(M,str1,"FontSize",10,"LineWidth",1,'Box','off','Location','southoutside')
+
+% Particle Swarm Optimization
+function [gBestScore,gBest,cg_curve]=PSO(N,iter,lb,ub,dim,y)
+
+%PSO Infotmation
+Vmax=ones(1,dim).*(ub-lb).*0.15;          
+noP=N;
+w=0.8;
+c1=1.5;
+c2=1.5;
+
+% Initializations
+vel=zeros(noP,dim);
+pBestScore=zeros(noP);
+pBest=zeros(noP,dim);
+gBest=zeros(1,dim);
+cg_curve=zeros(1,iter);
+
+% Random initialization for agents.
+
+pos = repmat(lb,N,1)+rand(N,dim).* repmat((ub-lb),N,1);
+
+for i=1:noP
+    pBestScore(i)=inf;
+end
+
+% Initialize gBestScore for a minimization problem
+gBestScore=inf;
+
+
+for l=1:iter
+    
+    % Return back the particles that go beyond the boundaries of the search space
+    for i=1:size(pos,1)
+        Flag4ub=pos(i,:)>ub;
+        Flag4lb=pos(i,:)<lb;
+        pos(i,:)=(pos(i,:).*(~(Flag4ub+Flag4lb)))+ub.*Flag4ub+lb.*Flag4lb;
+    end
+    
+    for i=1:size(pos,1)
+        %Calculate objective function for each particle
+        fitness= y(pos(i,:));
+        if(pBestScore(i)>fitness)
+            pBestScore(i)=fitness;
+            pBest(i,:)=pos(i,:);
+        end
+        if(gBestScore>fitness)
+            gBestScore=fitness;
+            gBest=pos(i,:);
+        end
+    end
+    
+    %Update the W of PSO
+  
+    %Update the Velocity and Position of particles
+    for i=1:size(pos,1)
+        for j=1:size(pos,2)
+            vel(i,j)=w*vel(i,j)+c1*rand()*(pBest(i,j)-pos(i,j))+c2*rand()*(gBest(j)-pos(i,j));
+            
+            if(vel(i,j)>Vmax(j))
+                vel(i,j)=Vmax(j);
+            end
+            if(vel(i,j)<-Vmax(j))
+                vel(i,j)=-Vmax(j);
+            end
+            pos(i,j)=pos(i,j)+vel(i,j);
+        end
+    end
+    cg_curve(l)=gBestScore;
+    disp(['PSO: At iteration ', num2str(l), ' ,the best fitness is ', num2str(gBestScore)])
+    disp(['PSO: At iteration ',num2str(l),'the best position is：[',num2str(gBest(1)),',',num2str(fix(gBest(2))),']'])
+
+end
+
+end
